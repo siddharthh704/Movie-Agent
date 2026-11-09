@@ -1,16 +1,14 @@
-import os
-import random
-import httpx
+import time
 import sqlite3
 import streamlit as st
 from datetime import datetime
 
 # ==========================================
-# PAGE CONFIGURATION & DARK THEME SETUP
+# PAGE CONFIGURATION & DARK THEME
 # ==========================================
 st.set_page_config(
-    page_title="Global Movie Agent",
-    page_icon="🌍",
+    page_title="Sudoku Solver Agent",
+    page_icon="🧩",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -18,153 +16,200 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main { background-color: #0e0e10; }
-    .movie-card {
+    div[data-testid="stTextInput"] input {
+        text-align: center;
+        font-size: 1.2rem;
+        font-weight: bold;
+        color: #ffffff;
+        background-color: #1e1e24;
+        border: 1px solid #3a3a45;
+        border-radius: 6px;
+    }
+    div[data-testid="stTextInput"] input:focus {
+        border-color: #ff4d4d;
+        background-color: #2a2a35;
+    }
+    .status-card {
         background-color: #18181c;
         border: 1px solid #2d2d35;
-        border-radius: 12px;
+        border-radius: 10px;
         padding: 16px;
-    }
-    .critic-verdict {
-        background-color: #2c1517;
-        border-left: 3px solid #e50914;
-        padding: 8px 12px;
-        border-radius: 4px;
-        margin-top: 10px;
-        font-style: italic;
-        color: #ffb3b3;
-        font-size: 0.85rem;
+        margin-bottom: 16px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-OMDB_API_KEY = st.secrets.get("OMDB_API_KEY", "")
-BASE_URL = "http://www.omdbapi.com/"
+# ==========================================
+# DATABASE LOGGING
+# ==========================================
+def init_db():
+    conn = sqlite3.connect("sudoku_agent.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS solve_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            difficulty TEXT,
+            solve_time_ms REAL,
+            status TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-# Global Languages & Curated Popular Keywords for OMDb compatibility
-LANGUAGE_KEYWORDS = {
-    "All World Cinema": ["Avengers", "Batman", "Inception", "Spider", "Matrix"],
-    "Hindi / Bollywood (हिंदी)": ["Dangal", "Pathaan", "Jawan", "3 Idiots", "Sholay", "RRR", "Brahmastra"],
-    "Korean / K-Drama (한국어)": ["Parasite", "Train to Busan", "Oldboy", "Decision to Leave", "Exhuma"],
-    "Japanese / Anime (日本語)": ["Suzume", "Your Name", "Godzilla", "Spirited Away", "Demon Slayer"],
-    "Tamil / Kollywood (தமிழ்)": ["Leo", "Jailer", "Vikram", "Ponniyin Selvan", "Master"],
-    "Telugu / Tollywood (తెలుగు)": ["RRR", "Pushpa", "Baahubali", "Kalki", "Salar"],
-    "Spanish (Español)": ["Pan's Labyrinth", "Roma", "Money Heist", "The Platform"],
-    "French (Français)": ["Amélie", "Intouchables", "La La Land", "Portrait of a Lady on Fire"]
-}
+def log_solve_event(difficulty, time_ms, status):
+    conn = sqlite3.connect("sudoku_agent.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO solve_logs (timestamp, difficulty, solve_time_ms, status) VALUES (?, ?, ?, ?)",
+        (datetime.utcnow().isoformat(), difficulty, time_ms, status)
+    )
+    conn.commit()
+    conn.close()
 
-PERSONA_TAKES = {
-    "Cynical Critic": [
-        "A rare moment where cinema actually got something right.",
-        "Aggressively mid. Ideal background noise while you check your phone.",
-        "A complete trainwreck. Watching paint dry has tighter pacing.",
-        "Critics praised it, which means you'll pretend to get the symbolism."
+init_db()
+
+# ==========================================
+# SUDOKU SOLVER ENGINE (BACKTRACKING)
+# ==========================================
+PRESET_PUZZLES = {
+    "Easy": [
+        [5, 3, 0, 0, 7, 0, 0, 0, 0],
+        [6, 0, 0, 1, 9, 5, 0, 0, 0],
+        [0, 9, 8, 0, 0, 0, 0, 6, 0],
+        [8, 0, 0, 0, 6, 0, 0, 0, 3],
+        [4, 0, 0, 8, 0, 3, 0, 0, 1],
+        [7, 0, 0, 0, 2, 0, 0, 0, 6],
+        [0, 6, 0, 0, 0, 0, 2, 8, 0],
+        [0, 0, 0, 4, 1, 9, 0, 0, 5],
+        [0, 0, 0, 0, 8, 0, 0, 7, 9]
     ],
-    "Film Historian": [
-        "A monumental landmark for global world cinema aesthetics.",
-        "Demonstrates masterclass direction and brilliant narrative pacing.",
-        "A quiet, underrated gem that deserves far more global recognition.",
-        "Offers a fascinating lens into the culture and era of its production."
+    "Medium": [
+        [0, 0, 0, 6, 0, 0, 4, 0, 0],
+        [7, 0, 0, 0, 0, 3, 6, 0, 0],
+        [0, 0, 0, 0, 9, 1, 0, 8, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 5, 0, 1, 8, 0, 0, 0, 3],
+        [0, 0, 0, 3, 0, 6, 0, 4, 5],
+        [0, 4, 0, 2, 0, 0, 0, 6, 0],
+        [9, 0, 3, 0, 0, 0, 0, 0, 0],
+        [0, 2, 0, 0, 0, 0, 1, 0, 0]
+    ],
+    "Hard": [
+        [0, 0, 0, 0, 0, 0, 0, 1, 2],
+        [0, 0, 0, 0, 3, 5, 0, 0, 0],
+        [0, 0, 0, 6, 0, 0, 0, 7, 0],
+        [7, 0, 0, 0, 0, 0, 3, 0, 0],
+        [0, 0, 0, 4, 0, 0, 8, 0, 0],
+        [1, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 1, 2, 0, 0, 0, 0],
+        [0, 8, 0, 0, 0, 0, 0, 4, 0],
+        [0, 5, 0, 0, 0, 0, 6, 0, 0]
     ]
 }
 
-def fetch_omdb_movies(search_term, year=None):
-    if not OMDB_API_KEY:
-        # Fallback Mock Data if API Key is not set in Secrets
-        return [
-            {
-                "title": "Parasite",
-                "year": "2019",
-                "rating": "8.5",
-                "genre": "Drama, Thriller",
-                "language": "Korean",
-                "country": "South Korea",
-                "overview": "Greed and class discrimination threaten the newly formed symbiotic relationship between the wealthy Park family and the destitute Kim clan.",
-                "poster": "https://m.media-amazon.com/images/M/MV5BYWZjMjk3ZTItODQ2ZC00NTlhLWE0WEItZmFjOWJhYzFiYWVmXkEyXkFqcGdeQXVyMTA3MDk2NDg2._V1_SX300.jpg"
-            },
-            {
-                "title": "RRR",
-                "year": "2022",
-                "rating": "7.8",
-                "genre": "Action, Drama",
-                "language": "Telugu, Tamil, Hindi",
-                "country": "India",
-                "overview": "A fearless revolutionary and an officer in the British army join forces to fight for independence.",
-                "poster": "https://m.media-amazon.com/images/M/MV5BODUwNDNjYzctODUxNy00ZTA2LWAyYTEtMDhhNDQwZjdhMGNmXkEyXkFqcGdeQXVyNTE1NjY5Mg@@._V1_SX300.jpg"
-            }
-        ]
+def is_valid(board, row, col, num):
+    for x in range(9):
+        if board[row][x] == num or board[x][col] == num:
+            return False
+    start_row, start_col = 3 * (row // 3), 3 * (col // 3)
+    for i in range(3):
+        for j in range(3):
+            if board[i + start_row][j + start_col] == num:
+                return False
+    return True
 
-    params = {"apikey": OMDB_API_KEY, "s": search_term, "type": "movie"}
-    if year:
-        params["y"] = year
+def solve_sudoku(board):
+    for r in range(9):
+        for c in range(9):
+            if board[r][c] == 0:
+                for num in range(1, 10):
+                    if is_valid(board, r, c, num):
+                        board[r][c] = num
+                        if solve_sudoku(board):
+                            return True
+                        board[r][c] = 0
+                return False
+    return True
 
-    try:
-        r = httpx.get(BASE_URL, params=params, timeout=8.0)
-        if r.status_code == 200 and r.json().get("Response") == "True":
-            results = r.json().get("Search", [])[:6]
-            detailed_movies = []
-            for item in results:
-                detail_req = httpx.get(BASE_URL, params={"apikey": OMDB_API_KEY, "i": item["imdbID"]}, timeout=5.0)
-                if detail_req.status_code == 200:
-                    data = detail_req.json()
-                    detailed_movies.append({
-                        "title": data.get("Title", "N/A"),
-                        "year": data.get("Year", "N/A"),
-                        "rating": data.get("imdbRating", "N/A"),
-                        "genre": data.get("Genre", "N/A"),
-                        "language": data.get("Language", "N/A"),
-                        "country": data.get("Country", "N/A"),
-                        "overview": data.get("Plot", "No plot available."),
-                        "poster": data.get("Poster") if data.get("Poster") != "N/A" else ""
-                    })
-            return detailed_movies
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
-    return []
+def is_board_valid(board):
+    for r in range(9):
+        for c in range(9):
+            val = board[r][c]
+            if val != 0:
+                board[r][c] = 0
+                if not is_valid(board, r, c, val):
+                    board[r][c] = val
+                    return False
+                board[r][c] = val
+    return True
 
 # ==========================================
 # USER INTERFACE
 # ==========================================
-st.title("🌐 Global Movie Intelligence Agent")
-st.caption("Search regional cinema worldwide with custom agent perspectives.")
+st.title("🧩 Sudoku Solver Agent")
+st.caption("Constraint Satisfaction Engine built with Python & Streamlit.")
+
+if "grid" not in st.session_state:
+    st.session_state.grid = [row[:] for row in PRESET_PUZZLES["Easy"]]
 
 with st.sidebar:
-    st.header("🔍 Filter & Search Options")
+    st.header("⚙️ Agent Settings")
+    preset_choice = st.selectbox("Load Preset Puzzle", ["Custom", "Easy", "Medium", "Hard"])
     
-    selected_persona = st.selectbox("Agent Persona", ["Cynical Critic", "Film Historian"])
-    selected_region = st.selectbox("Select Global Region / Language", list(LANGUAGE_KEYWORDS.keys()))
-    
-    custom_title = st.text_input("Or Direct Movie Title (Optional)", placeholder="e.g. Inception, KGF, Naruto")
-    release_year = st.number_input("Release Year (Optional)", min_value=1950, max_value=2026, value=None)
-    
-    search_btn = st.button("Search Movies 🍿", type="primary", use_container_width=True)
+    if st.button("Load Selected Preset", use_container_width=True):
+        if preset_choice != "Custom":
+            st.session_state.grid = [row[:] for row in PRESET_PUZZLES[preset_choice]]
+            st.rerun()
 
-if search_btn:
-    # Determine search term
-    if custom_title.strip():
-        search_query = custom_title.strip()
-    else:
-        # Pick a random keyword from the selected regional bucket to ensure valid OMDb results
-        search_query = random.choice(LANGUAGE_KEYWORDS[selected_region])
+    if st.button("Clear Grid 🧹", use_container_width=True):
+        st.session_state.grid = [[0]*9 for _ in range(9)]
+        st.rerun()
 
-    with st.spinner(f"Fetching movies matching '{search_query}'..."):
-        movies = fetch_omdb_movies(search_query, release_year)
-        
-    if movies:
-        st.success(f"Showing top results for category: **{selected_region}** (Search: *{search_query}*)")
-        
-        cols = st.columns(3)
-        for i, movie in enumerate(movies):
-            with cols[i % 3]:
-                if movie["poster"]:
-                    st.image(movie["poster"], use_container_width=True)
-                
-                st.subheader(movie["title"])
-                st.write(f"⭐ **IMDb: {movie['rating']}** | 📅 {movie['year']} | 🌍 {movie['country']}")
-                st.caption(f"🗣️ **Lang:** {movie['language']} | 🎭 **Genre:** {movie['genre']}")
-                st.write(movie["overview"][:140] + "..." if len(movie["overview"]) > 140 else movie["overview"])
-                
-                verdict = random.choice(PERSONA_TAKES[selected_persona])
-                st.markdown(f'<div class="critic-verdict"><b>[{selected_persona}]:</b> "{verdict}"</div>', unsafe_allow_html=True)
-                st.markdown("---")
+# Render 9x9 Grid Input UI
+st.subheader("Interactive 9x9 Grid")
+
+grid_input = [[0]*9 for _ in range(9)]
+cols_container = st.container()
+
+with cols_container:
+    for r in range(9):
+        cols = st.columns(9)
+        for c in range(9):
+            val = st.session_state.grid[r][c]
+            input_val = cols[c].text_input(
+                label=f"r{r}c{c}",
+                value=str(val) if val != 0 else "",
+                key=f"cell_{r}_{c}",
+                label_visibility="collapsed"
+            )
+            try:
+                grid_input[r][c] = int(input_val) if input_val.strip().isdigit() and 1 <= int(input_val) <= 9 else 0
+            except ValueError:
+                grid_input[r][c] = 0
+
+col_btn1, col_btn2 = st.columns([1, 4])
+
+with col_btn1:
+    solve_clicked = st.button("Solve Puzzle ⚡", type="primary", use_container_width=True)
+
+if solve_clicked:
+    if not is_board_valid(grid_input):
+        st.error("❌ Invalid Board Configuration! Check for duplicate numbers in the same row, column, or 3x3 box.")
+        log_solve_event(preset_choice, 0, "Invalid Initial Input")
     else:
-        st.warning("No matches found for this specific year/title combo. Clear the year box or try a direct movie title!")
+        start_time = time.time()
+        board_copy = [row[:] for row in grid_input]
+        
+        with st.spinner("Agent is solving board constraints..."):
+            success = solve_sudoku(board_copy)
+            elapsed_time_ms = round((time.time() - start_time) * 1000, 2)
+
+        if success:
+            st.session_state.grid = board_copy
+            st.success(f"✅ Solved successfully in **{elapsed_time_ms} ms**!")
+            log_solve_event(preset_choice, elapsed_time_ms, "Success")
+            st.rerun()
+        else:
+            st.error("❌ Unsolvable Sudoku Puzzle!")
+            log_solve_event(preset_choice, elapsed_time_ms, "Unsolvable")
