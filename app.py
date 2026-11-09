@@ -6,10 +6,10 @@ import streamlit as st
 from datetime import datetime
 
 # ==========================================
-# PAGE CONFIGURATION & DARK THEME SETUP
+# PAGE CONFIGURATION & DARK THEME
 # ==========================================
 st.set_page_config(
-    page_title="Global Movie Agent",
+    page_title="Global Movie Agent (OMDb)",
     page_icon="🌍",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -23,7 +23,6 @@ st.markdown("""
         border: 1px solid #2d2d35;
         border-radius: 12px;
         padding: 16px;
-        height: 100%;
     }
     .critic-verdict {
         background-color: #2c1517;
@@ -39,79 +38,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# DATABASE & LOGGING
+# API & LOGGING SETUP
 # ==========================================
-def init_db():
-    conn = sqlite3.connect("global_movie_agent.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS search_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            language TEXT,
-            genre TEXT,
-            min_rating REAL,
-            release_year INTEGER
-        )
-    """)
-    conn.commit()
-    conn.close()
+OMDB_API_KEY = st.secrets.get("OMDB_API_KEY", "")
+BASE_URL = "http://www.omdbapi.com/"
 
-def log_search(lang, genre, rating, year):
-    conn = sqlite3.connect("global_movie_agent.db")
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO search_logs (timestamp, language, genre, min_rating, release_year) VALUES (?, ?, ?, ?, ?)",
-        (datetime.utcnow().isoformat(), lang, str(genre), rating, year)
-    )
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# ==========================================
-# API CONFIGURATION & MAPPINGS
-# ==========================================
-TMDB_API_KEY = st.secrets.get("TMDB_API_KEY", "")
-BASE_URL = "https://api.themoviedb.org/3"
-
-# Comprehensive Global Language Mapping
-LANGUAGES = {
-    "All Languages (Global)": "",
-    "Hindi (हिंदी)": "hi",
-    "Korean (한국어)": "ko",
-    "Japanese (日本語)": "ja",
-    "Tamil (தமிழ்)": "ta",
-    "Telugu (తెలుగు)": "te",
-    "Malayalam (മലയാളം)": "ml",
-    "Spanish (Español)": "es",
-    "French (Français)": "fr",
-    "German (Deutsch)": "de",
-    "Italian (Italiano)": "it",
-    "Mandarin (中文)": "zh",
-    "English": "en"
-}
-
-GENRES = {
-    "All Genres": None,
-    "Action": 28,
-    "Adventure": 12,
-    "Animation": 16,
-    "Comedy": 35,
-    "Crime": 80,
-    "Documentary": 99,
-    "Drama": 18,
-    "Family": 10751,
-    "Fantasy": 14,
-    "History": 36,
-    "Horror": 27,
-    "Mystery": 9648,
-    "Romance": 10749,
-    "Sci-Fi": 878,
-    "Thriller": 53
-}
-
-# Persona Takes
+# Agent Personas
 PERSONA_TAKES = {
     "Cynical Critic": [
         "A rare moment where cinema actually got something right.",
@@ -127,95 +59,83 @@ PERSONA_TAKES = {
     ]
 }
 
-def fetch_global_movies(lang_code, genre_id, min_rating, year, min_votes):
-    if not TMDB_API_KEY:
+def fetch_omdb_movies(search_query, year):
+    if not OMDB_API_KEY:
         return []
 
     params = {
-        "api_key": TMDB_API_KEY,
-        "language": "en-US",
-        "sort_by": "popularity.desc",
-        "include_adult": False,
-        "vote_count.gte": min_votes,
-        "vote_average.gte": min_rating,
-        "page": 1
+        "apikey": OMDB_API_KEY,
+        "s": search_query if search_query else "movie",
+        "type": "movie"
     }
-
-    if lang_code:
-        params["with_original_language"] = lang_code
-    if genre_id:
-        params["with_genres"] = genre_id
     if year:
-        params["primary_release_year"] = year
+        params["y"] = year
 
     try:
-        r = httpx.get(f"{BASE_URL}/discover/movie", params=params, timeout=8.0)
-        if r.status_code == 200:
-            movies = r.json().get("results", [])[:12]
-            processed = []
-            for m in movies:
-                processed.append({
-                    "title": m.get("title"),
-                    "original_title": m.get("original_title"),
-                    "rating": m.get("vote_average", 0.0),
-                    "vote_count": m.get("vote_count", 0),
-                    "release_date": m.get("release_date", "N/A")[:4],
-                    "overview": m.get("overview", "No synopsis available."),
-                    "poster_path": f"https://image.tmdb.org/t/p/w500{m.get('poster_path')}" if m.get("poster_path") else "",
-                    "lang": m.get("original_language", "").upper()
-                })
-            return processed
+        r = httpx.get(BASE_URL, params=params, timeout=8.0)
+        if r.status_code == 200 and r.json().get("Response") == "True":
+            results = r.json().get("Search", [])[:9]
+            
+            # Fetch detailed info for each movie to get plot, ratings, & genre
+            detailed_movies = []
+            for item in results:
+                detail_req = httpx.get(BASE_URL, params={"apikey": OMDB_API_KEY, "i": item["imdbID"]}, timeout=5.0)
+                if detail_req.status_code == 200:
+                    data = detail_req.json()
+                    detailed_movies.append({
+                        "title": data.get("Title", "N/A"),
+                        "year": data.get("Year", "N/A"),
+                        "rating": data.get("imdbRating", "N/A"),
+                        "genre": data.get("Genre", "N/A"),
+                        "language": data.get("Language", "N/A"),
+                        "country": data.get("Country", "N/A"),
+                        "overview": data.get("Plot", "No plot available."),
+                        "poster": data.get("Poster") if data.get("Poster") != "N/A" else ""
+                    })
+            return detailed_movies
     except Exception as e:
-        st.error(f"Network error: {e}")
+        st.error(f"Error fetching data: {e}")
     return []
 
 # ==========================================
 # USER INTERFACE
 # ==========================================
 st.title("🌐 Global Movie Intelligence Agent")
-st.caption("Discover cinema from around the globe with live ratings, original titles, and personalized commentary.")
+st.caption("Powered by OMDb API — Search world cinema, Bollywood, Anime, Korean drama, and European titles.")
 
 with st.sidebar:
     st.header("🔍 Global Search Filters")
     
     selected_persona = st.selectbox("Agent Persona", ["Cynical Critic", "Film Historian"])
-    selected_lang_label = st.selectbox("Original Language", list(LANGUAGES.keys()))
-    selected_genre_label = st.selectbox("Genre", list(GENRES.keys()))
     
-    min_rating = st.slider("Minimum Rating (TMDB)", 0.0, 9.5, 6.0, 0.5)
-    min_votes = st.select_slider("Minimum Votes (Filtering noise)", options=[10, 50, 100, 500, 1000], value=100)
+    # Text input allows searching any region/category globally
+    search_query = st.text_input("Global Category or Title", value="Hindi", help="e.g., Hindi, Korean, Anime, Action, France, Batman, Drama")
     release_year = st.number_input("Release Year (Optional)", min_value=1940, max_value=2026, value=None)
     
-    search_btn = st.button("Find Movies 🍿", type="primary", use_container_width=True)
+    search_btn = st.button("Search Movies 🍿", type="primary", use_container_width=True)
 
 if search_btn:
-    lang_code = LANGUAGES[selected_lang_label]
-    genre_id = GENRES[selected_genre_label]
-    log_search(selected_lang_label, selected_genre_label, min_rating, release_year)
-    
-    with st.spinner("Fetching live global movie records..."):
-        movies = fetch_global_movies(lang_code, genre_id, min_rating, release_year, min_votes)
+    with st.spinner("Fetching global movie database records..."):
+        movies = fetch_omdb_movies(search_query, release_year)
         
-    if not TMDB_API_KEY:
-        st.error("🔑 **TMDb API Key Missing!** Please add your `TMDB_API_KEY` in Streamlit Cloud Secrets (Advanced Settings) to fetch live data.")
+    if not OMDB_API_KEY:
+        st.error("🔑 **OMDb API Key Missing!** Please add `OMDB_API_KEY` in your Streamlit Cloud Secrets.")
     elif movies:
-        st.success(f"Fetched {len(movies)} top matching titles from global databases.")
+        st.success(f"Fetched top results for '{search_query}'.")
         
         cols = st.columns(3)
         for i, movie in enumerate(movies):
             with cols[i % 3]:
-                if movie["poster_path"]:
-                    st.image(movie["poster_path"], use_container_width=True)
+                if movie["poster"]:
+                    st.image(movie["poster"], use_container_width=True)
                 
                 st.subheader(movie["title"])
-                if movie["original_title"] != movie["title"]:
-                    st.caption(f"Original Title: *{movie['original_title']}*")
-                
-                st.write(f"⭐ **{movie['rating']:.1f}/10** ({movie['vote_count']} votes) | 📅 {movie['release_date']} | 🗣️ {movie['lang']}")
+                st.write(f"⭐ **IMDb: {movie['rating']}** | 📅 {movie['year']} | 🌍 {movie['country']}")
+                st.caption(f"🗣️ **Lang:** {movie['language']} | 🎭 **Genre:** {movie['genre']}")
                 st.write(movie["overview"][:140] + "..." if len(movie["overview"]) > 140 else movie["overview"])
                 
                 verdict = random.choice(PERSONA_TAKES[selected_persona])
                 st.markdown(f'<div class="critic-verdict"><b>[{selected_persona}]:</b> "{verdict}"</div>', unsafe_allow_html=True)
                 st.markdown("---")
     else:
-        st.warning("No movies matched these strict filters. Try lowering the minimum rating or minimum vote threshold.")
+        st.warning("No movies found. Try broader search terms like 'India', 'Japan', 'Action', or '2023'.")
